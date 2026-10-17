@@ -1,0 +1,18 @@
+# Blender and Python generated files
+__pycache__/
+*.py[cod]
+*.blend
+*.blend1
+
+# Local capture data and generated texture/output folders
+frame_*/
+textures/
+nr_blender_output/
+Naraka_NR_Output/
+outputs/
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

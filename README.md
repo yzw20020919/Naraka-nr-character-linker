@@ -1,5 +1,7 @@
 # Naraka NR Character Linker
 
+[English documentation](README_EN.md)
+
 用于 Blender 的 Ninja Ripper `.nr` 模型整理插件，适合处理《永劫无间》（Naraka: Bladepoint）导出的 `frame_*` 捕获文件夹。
 
 插件会自动识别可能的角色网格组，连接 UV、颜色贴图和法线贴图，并将静态角色整理到 Blender 坐标中。

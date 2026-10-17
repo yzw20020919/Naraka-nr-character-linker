@@ -12,6 +12,8 @@ Blender add-on for importing Ninja Ripper `.nr` captures from Naraka: Bladepoint
 - Converts captured texture files through FFmpeg when needed.
 - Places the character upright with feet at `Z = 0` and the face toward Blender `-Y`.
 - Creates front/back cameras and simple lights for inspection.
+- Repairs detached face, eye, hair-cap, and hair-card draw channels found in some captures.
+- Removes invalid triangles and recalculates normals; solid body and clothing meshes can use level 0–2 subdivision for display refinement.
 
 ## Install
 
@@ -30,6 +32,8 @@ The ZIP must contain a top-level `r_character_linker` folder with `__init__.py` 
 3. Set **FFmpeg path** when DDS or another format needs conversion. Leave it empty when `ffmpeg` is available on the system `PATH`.
 4. Optionally set **Output folder**. If it is empty, converted textures are written beside the saved `.blend`, or to `Naraka_NR_Output` when the file has not been saved yet.
 5. Click **Import and link character**.
+
+Before importing, you can adjust **Repair detached face and hair** and **Geometry refinement**. The repair option is enabled by default and aligns head-related draw channels to the captured face. Refinement defaults to level 1; hair cards and repaired head cards are excluded so their transparent silhouettes are preserved.
 
 The imported meshes are placed in the `NR_Character` collection. Converted textures are written under the selected output folder's `textures` directory.
 

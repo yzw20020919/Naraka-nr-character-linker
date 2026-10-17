@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Naraka NR Character Linker",
     "author": "Codex",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 6, 0),
     "location": "3D View > Sidebar > Naraka NR",
     "description": "Import a Ninja Ripper capture, find the character group, link textures, and align it in Blender.",
@@ -20,6 +20,7 @@ import sys
 from collections import defaultdict
 
 import bpy
+import bmesh
 from bpy.props import BoolProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
 from mathutils import Vector
@@ -40,6 +41,11 @@ _HAIR_STEMS = {
     "000001A298B86460", "000001A29B25A220",
     "00000115CCFD1BA0", "00000116AE0D9620",
 }
+_FACE_STEMS = {"00000115CCFCDC60"}
+_HEAD_STEMS = _HAIR_STEMS | {
+    "00000115A23C79E0", "000001157D255860", "000001141AC534E0",
+    "00000115CCFD31A0",
+}
 
 
 def _finite(value, fallback=0.0):
@@ -55,6 +61,42 @@ def _normalize(value):
     if length <= 1.0e-12:
         return (0.0, 0.0, 0.0)
     return tuple(v / length for v in value)
+
+
+def _texture_stem(entry):
+    textures = entry.get("textures") or []
+    return os.path.splitext(os.path.basename(textures[0] if textures else ""))[0].upper()
+
+
+def _repair_detached_head_parts(entries):
+    """Align head draw channels to the captured face when a transform is missing."""
+    face_entries = [entry for entry in entries if _texture_stem(entry) in _FACE_STEMS]
+    head_entries = [
+        entry for entry in entries
+        if _texture_stem(entry) in _HEAD_STEMS
+        or any(hint in _texture_stem(entry).lower() for hint in _HAIR_HINTS)
+    ]
+    if not face_entries or not head_entries:
+        return 0
+
+    def center(entry):
+        points = [_transform_position(point) for point in entry["positions"]]
+        return tuple(sum(point[index] for point in points) / len(points) for index in range(3))
+
+    face_center = center(face_entries[0])
+    head_centers = [center(entry) for entry in head_entries]
+    # The capture lost one common draw transform. Estimate that transform from
+    # the group centroid so eyes, cap, and strands keep their relative layout.
+    group_center = tuple(
+        sum(value[index] for value in head_centers) / len(head_centers)
+        for index in range(3)
+    )
+    repair_offset = tuple(face_center[index] - group_center[index] for index in range(3))
+    repaired = 0
+    for entry in head_entries:
+        entry["repair_offset"] = repair_offset
+        repaired += 1
+    return repaired
 
 
 def _attr_by_semantic(attrs, names, minimum=1):
@@ -446,11 +488,23 @@ def _create_object(entry, object_index, vertices, offset, collection, materials,
     final_normals = []
     for position in entry["positions"]:
         transformed = _transform_position(position)
-        final_vertices.append((transformed[0] + offset[0], transformed[1] + offset[1], transformed[2] + offset[2]))
+        repair = entry.get("repair_offset", (0.0, 0.0, 0.0))
+        final_vertices.append((
+            transformed[0] + offset[0] + repair[0],
+            transformed[1] + offset[1] + repair[1],
+            transformed[2] + offset[2] + repair[2],
+        ))
     for normal in entry["normals"]:
         final_normals.append(_transform_normal(normal))
     mesh = bpy.data.meshes.new("NR_" + os.path.splitext(entry["source"])[0])
     mesh.from_pydata(final_vertices, [], entry["faces"])
+    mesh.update()
+    mesh.validate(clean_customdata=True)
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(mesh)
+    bm.free()
     mesh.update()
     if entry["uvs"] and len(entry["uvs"]) == len(final_vertices):
         uv_layer = mesh.uv_layers.new(name="UVMap")
@@ -471,8 +525,20 @@ def _create_object(entry, object_index, vertices, offset, collection, materials,
     obj.data.materials.append(material)
     for polygon in mesh.polygons:
         polygon.use_smooth = True
+    if bpy.context.scene.nr_character.subdivision_level > 0 and not entry.get("repair_offset"):
+        modifier = obj.modifiers.new("NR Geometry Refinement", "SUBSURF")
+        modifier.subdivision_type = "CATMULL_CLARK"
+        modifier.levels = bpy.context.scene.nr_character.subdivision_level
+        modifier.render_levels = bpy.context.scene.nr_character.subdivision_level
+        try:
+            modifier.uv_smooth = "PRESERVE_CORNERS"
+        except Exception:
+            pass
     obj["NR_source_file"] = entry["source"]
     obj["NR_source_texture"] = entry["textures"][0] if entry["textures"] else ""
+    obj["NR_repair_offset"] = tuple(round(value, 6) for value in entry.get("repair_offset", (0.0, 0.0, 0.0)))
+    obj["NR_normals_recalculated"] = True
+    obj["NR_subdivision_level"] = int(bpy.context.scene.nr_character.subdivision_level if not entry.get("repair_offset") else 0)
     return obj
 
 
@@ -520,9 +586,16 @@ def import_capture(folder, group_hint=""):
         raise RuntimeError("Capture folder does not exist: " + folder)
     groups = _scan_groups(folder, group_hint.strip())
     group_id, entries = _choose_group(groups)
+    repaired_parts = _repair_detached_head_parts(entries) if bpy.context.scene.nr_character.repair_detached_parts else 0
     _remove_collection(_CHAR_COLLECTION)
     collection = _collection(_CHAR_COLLECTION)
-    transformed = [_transform_position(position) for entry in entries for position in entry["positions"]]
+    transformed = []
+    for entry in entries:
+        repair = entry.get("repair_offset", (0.0, 0.0, 0.0))
+        transformed.extend(
+            tuple(value + repair[index] for index, value in enumerate(_transform_position(position)))
+            for position in entry["positions"]
+        )
     min_x = min(position[0] for position in transformed)
     max_x = max(position[0] for position in transformed)
     min_y = min(position[1] for position in transformed)
@@ -566,6 +639,7 @@ def import_capture(folder, group_hint=""):
     scene["NR_capture_folder"] = folder
     scene["NR_group_id"] = group_id
     scene["NR_character_height"] = max_z - min_z
+    scene["NR_repaired_head_hair_parts"] = repaired_parts
     return group_id, len(entries), sum(len(entry["positions"]) for entry in entries), sum(len(entry["faces"]) for entry in entries)
 
 
@@ -576,6 +650,18 @@ class NRCharacterProperties(PropertyGroup):
     # Keep the public plugin portable. Users can set a custom executable in the
     # panel; when this is empty, the importer searches the system PATH.
     ffmpeg_path: StringProperty(name="FFmpeg path", subtype="FILE_PATH", default="")
+    repair_detached_parts: BoolProperty(
+        name="Repair detached face and hair",
+        description="Align captured hair, eyes, and face cards when their draw transform is missing",
+        default=True,
+    )
+    subdivision_level: IntProperty(
+        name="Geometry refinement",
+        description="Subdivision Surface level for solid body meshes; hair cards and repaired parts are excluded",
+        min=0,
+        max=2,
+        default=1,
+    )
     last_report: StringProperty(name="Last report", default="")
 
 
@@ -626,6 +712,8 @@ class NR_PT_CharacterLinker(Panel):
         layout.prop(props, "output_dir")
         layout.prop(props, "group_hint")
         layout.prop(props, "ffmpeg_path")
+        layout.prop(props, "repair_detached_parts")
+        layout.prop(props, "subdivision_level")
         layout.operator("nr_character.import_capture", icon="IMPORT")
         if props.last_report:
             layout.label(text=props.last_report)

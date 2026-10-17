@@ -17,6 +17,8 @@
 4. 可选填写 **Output folder**。留空时，已保存的 `.blend` 会将文件写到同级 `nr_blender_output\<frame名>`；未保存的工程则写到用户目录 `Naraka_NR_Output\<frame名>`。
 5. 点击 **Import and link character**。模型会放入 `NR_Character` 集合，贴图放在输出目录的 `textures` 子目录。
 
+导入前可在面板中调整 **Repair detached face and hair** 和 **Geometry refinement**。前者默认开启，会把头部相关绘制通道按脸部位置校正；后者默认是 1，发丝卡片和被校正的头部卡片不会做细分，以免透明轮廓变形。
+
 默认坐标整理会将角色直立、脚底对齐 `Z=0`，并让面部朝 Blender 的 `-Y` 方向，同时建立前后查看相机和简单灯光。自动识别依据网格几何、重复绘制通道、主体部件数量及贴图绑定情况；不同捕获仍可能需要手动指定组号。
 
 ## 说明

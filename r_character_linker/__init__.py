@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Naraka NR Character Linker",
     "author": "Codex",
-    "version": (1, 2, 0),
+    "version": (1, 2, 4),
     "blender": (3, 6, 0),
     "location": "3D View > Sidebar > Naraka NR",
     "description": "Import a Ninja Ripper capture, find the character group, link textures, and align it in Blender.",
     "category": "Import-Export",
 }
 
+import array
 import glob
 import hashlib
 import math
@@ -40,7 +41,11 @@ _HAIR_STEMS = {
     "00000115A2146620", "000001157D255B20", "000001161EE4CD60",
     "000001A298B86460", "000001A29B25A220",
     "00000115CCFD1BA0", "00000116AE0D9620",
+    # Hair card direction/opacity map from the 2026-10-22 Naraka capture.
+    "000001F05F2A4FA0",
 }
+_HAIR_DIRECTION_CACHE = {}
+_ALPHA_PROFILE_CACHE = {}
 _FACE_STEMS = {"00000115CCFCDC60"}
 _HEAD_STEMS = _HAIR_STEMS | {
     "00000115A23C79E0", "000001157D255860", "000001141AC534E0",
@@ -374,13 +379,14 @@ def _convert_texture(source, output_dir, ffmpeg):
     return source
 
 
-def _convert_hair_texture(source, output_dir, ffmpeg):
+def _convert_hair_texture(source, output_dir, ffmpeg, tint=(23, 20, 33)):
     """Tint hair direction maps while preserving their captured alpha."""
     if not source or not os.path.isfile(source):
         return None
     os.makedirs(output_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(source))[0]
-    destination = os.path.join(output_dir, stem + "_hair.png")
+    tint = tuple(max(0, min(255, int(value))) for value in tint)
+    destination = os.path.join(output_dir, stem + "_hair_%02X%02X%02X.png" % tint)
     if os.path.isfile(destination):
         return destination
     if ffmpeg:
@@ -388,7 +394,7 @@ def _convert_hair_texture(source, output_dir, ffmpeg):
             proc = subprocess.run(
                 [
                     ffmpeg, "-y", "-loglevel", "error", "-i", source,
-                    "-vf", "format=rgba,lutrgb=r=23:g=20:b=33",
+                    "-vf", "format=rgba,lutrgb=r=%d:g=%d:b=%d" % tint,
                     "-frames:v", "1", destination,
                 ],
                 stdout=subprocess.PIPE,
@@ -400,6 +406,58 @@ def _convert_hair_texture(source, output_dir, ffmpeg):
         except Exception:
             pass
     return _convert_texture(source, output_dir, ffmpeg)
+
+
+def _looks_like_hair_direction_map(image):
+    """Identify tinted directional hair cards without relying on capture IDs."""
+    cache_key = (image.filepath or image.name_full, tuple(image.size))
+    cached = _HAIR_DIRECTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        width, height = (int(image.size[0]), int(image.size[1]))
+        channels = int(image.channels)
+        if channels < 4 or max(width, height) > 1024 or width * height < 64:
+            _HAIR_DIRECTION_CACHE[cache_key] = False
+            return False
+        pixels = array.array("f", [0.0]) * (width * height * channels)
+        image.pixels.foreach_get(pixels)
+        grid_x, grid_y = min(24, width), min(24, height)
+        sums = [0.0, 0.0, 0.0, 0.0]
+        transparent = 0
+        opaque = 0
+        count = 0
+        for gy in range(grid_y):
+            y = int(round(gy * (height - 1) / max(1, grid_y - 1)))
+            for gx in range(grid_x):
+                x = int(round(gx * (width - 1) / max(1, grid_x - 1)))
+                offset = (y * width + x) * channels
+                sample = [float(pixels[offset + channel]) for channel in range(4)]
+                for channel, value in enumerate(sample):
+                    sums[channel] += value
+                transparent += sample[3] <= 0.05
+                opaque += sample[3] >= 0.95
+                count += 1
+        if not count:
+            _HAIR_DIRECTION_CACHE[cache_key] = False
+            return False
+        means = [value / count for value in sums]
+        transparent_ratio = transparent / count
+        opaque_ratio = opaque / count
+        result = (
+            0.08 <= means[0] <= 0.32
+            and 0.08 <= means[1] <= 0.30
+            and 0.14 <= means[2] <= 0.38
+            and means[2] - means[1] >= 0.025
+            and means[3] <= 0.38
+            and transparent_ratio >= 0.45
+            and opaque_ratio >= 0.02
+        )
+        _HAIR_DIRECTION_CACHE[cache_key] = result
+        return result
+    except Exception:
+        _HAIR_DIRECTION_CACHE[cache_key] = False
+        return False
 
 
 def _image_node(nodes, links, shader, source, base_dir, colorspace, label, y):
@@ -441,14 +499,125 @@ def _set_alpha_mode(material):
         pass
 
 
+def _looks_like_tangent_normal(image):
+    """Recognize conventional RGB tangent normals, not packed material masks.
+
+    Ninja Ripper captures texture bindings without their shader slot names.
+    The second binding is often a packed mask, so only connect it as a normal
+    when sampled RGB values have the blue-dominant signature of a tangent map.
+    """
+    try:
+        width, height = (int(image.size[0]), int(image.size[1]))
+        if width < 2 or height < 2 or image.channels < 3:
+            return False
+        pixels = image.pixels
+        grid_x = min(16, width)
+        grid_y = min(16, height)
+        sums = [0.0, 0.0, 0.0]
+        positive_z = 0
+        count = 0
+        for gy in range(grid_y):
+            y = int(round(gy * (height - 1) / max(1, grid_y - 1)))
+            for gx in range(grid_x):
+                x = int(round(gx * (width - 1) / max(1, grid_x - 1)))
+                offset = (y * width + x) * image.channels
+                red = float(pixels[offset])
+                green = float(pixels[offset + 1])
+                blue = float(pixels[offset + 2])
+                sums[0] += red
+                sums[1] += green
+                sums[2] += blue
+                positive_z += blue > 0.5
+                count += 1
+        if not count:
+            return False
+        means = [value / count for value in sums]
+        return (
+            means[2] >= 0.68
+            and 0.2 <= means[0] <= 0.8
+            and 0.2 <= means[1] <= 0.8
+            and positive_z / count >= 0.75
+        )
+    except Exception:
+        return False
+
+
+def _alpha_profile(image):
+    """Sample clear, opaque, and blended alpha coverage without loading a pixel copy."""
+    try:
+        width, height = (int(image.size[0]), int(image.size[1]))
+        channels = int(image.channels)
+        if width < 2 or height < 2 or channels < 4:
+            return None
+        cache_key = (image.filepath or image.name_full, tuple(image.size))
+        if cache_key in _ALPHA_PROFILE_CACHE:
+            return _ALPHA_PROFILE_CACHE[cache_key]
+        pixels = image.pixels
+        grid_x = min(32, width)
+        grid_y = min(32, height)
+        transparent = 0
+        opaque = 0
+        count = 0
+        for gy in range(grid_y):
+            y = int(round(gy * (height - 1) / max(1, grid_y - 1)))
+            for gx in range(grid_x):
+                x = int(round(gx * (width - 1) / max(1, grid_x - 1)))
+                alpha = float(pixels[(y * width + x) * channels + 3])
+                transparent += alpha <= 0.05
+                opaque += alpha >= 0.95
+                count += 1
+        profile = (
+            transparent / count,
+            opaque / count,
+            1.0 - (transparent + opaque) / count,
+        ) if count else None
+        _ALPHA_PROFILE_CACHE[cache_key] = profile
+        return profile
+    except Exception:
+        return None
+
+
+def _has_hair_cutout_alpha(image):
+    """Detect sparse hair/eyelash cutouts that need crisp binary coverage."""
+    profile = _alpha_profile(image)
+    return bool(profile and profile[0] >= 0.45 and profile[1] >= 0.02)
+
+
+def _has_blended_opacity_alpha(image):
+    """Recognize diffuse maps with both clear holes and broad soft opacity."""
+    profile = _alpha_profile(image)
+    if not profile:
+        return False
+    transparent, opaque, intermediate = profile
+    return (
+        0.08 <= transparent <= 0.40
+        and opaque >= 0.18
+        and intermediate >= 0.25
+    )
+
+
 def _material_for(texture_source, normal_source, source_dir, texture_dir, ffmpeg, material_cache):
     if texture_source and not os.path.isabs(texture_source):
         texture_source = os.path.join(source_dir, texture_source)
     if normal_source and not os.path.isabs(normal_source):
         normal_source = os.path.join(source_dir, normal_source)
     texture_stem = os.path.splitext(os.path.basename(texture_source or ""))[0]
-    is_hair = texture_stem in _HAIR_STEMS or any(hint in texture_stem.lower() for hint in _HAIR_HINTS)
-    base_source = _convert_hair_texture(texture_source, texture_dir, ffmpeg) if is_hair else _convert_texture(texture_source, texture_dir, ffmpeg)
+    explicit_hair = texture_stem in _HAIR_STEMS or any(hint in texture_stem.lower() for hint in _HAIR_HINTS)
+    candidate_source = _convert_texture(texture_source, texture_dir, ffmpeg)
+    candidate_image = None
+    if candidate_source:
+        try:
+            candidate_image = bpy.data.images.load(candidate_source, check_existing=True)
+        except Exception:
+            pass
+    detected_direction_map = bool(candidate_image and _looks_like_hair_direction_map(candidate_image))
+    is_hair = explicit_hair or detected_direction_map
+    if explicit_hair:
+        base_source = _convert_hair_texture(texture_source, texture_dir, ffmpeg)
+    elif detected_direction_map:
+        base_source = _convert_hair_texture(texture_source, texture_dir, ffmpeg, tint=(58, 39, 28))
+    else:
+        base_source = candidate_source
     normal_source = _convert_texture(normal_source, texture_dir, ffmpeg)
     key = (base_source, normal_source)
     if key in material_cache:
@@ -468,17 +637,37 @@ def _material_for(texture_source, normal_source, source_dir, texture_dir, ffmpeg
     base = _image_node(nodes, links, shader, base_source, source_dir, "sRGB", "NR_BaseColor", 100)
     if base:
         links.new(base.outputs["Color"], shader.inputs["Base Color"])
-        if getattr(base.image, "channels", 3) >= 4:
+        if is_hair or _has_hair_cutout_alpha(base.image):
+            alpha_cutout = nodes.new("ShaderNodeMath")
+            alpha_cutout.name = "NR_AlphaCutout"
+            alpha_cutout.label = "Alpha cutout (0.5)"
+            alpha_cutout.operation = "GREATER_THAN"
+            alpha_cutout.inputs[1].default_value = 0.5
+            alpha_cutout.location = (-80, 160)
+            links.new(base.outputs["Alpha"], alpha_cutout.inputs[0])
+            links.new(alpha_cutout.outputs[0], shader.inputs["Alpha"])
+            _set_alpha_mode(material)
+            material["NR_alpha_cutout_threshold"] = 0.5
+            material["NR_alpha_mode"] = "CUTOUT"
+        elif _has_blended_opacity_alpha(base.image):
             links.new(base.outputs["Alpha"], shader.inputs["Alpha"])
             _set_alpha_mode(material)
+            material["NR_alpha_mode"] = "BLENDED"
     if is_hair:
         material["NR_hair_map"] = True
-    normal = _image_node(nodes, links, shader, normal_source, source_dir, "Non-Color", "NR_Normal", -120)
-    if normal:
+        if detected_direction_map and not explicit_hair:
+            material["NR_auto_hair_direction_map"] = True
+    normal = _image_node(nodes, links, shader, normal_source, source_dir, "Non-Color", "NR_Normal_Candidate", -120)
+    if normal and _looks_like_tangent_normal(normal.image):
+        normal.name = "NR_Normal"
+        normal.label = "NR_Normal"
         normal_map = nodes.new("ShaderNodeNormalMap")
         normal_map.location = (-20, -90)
         links.new(normal.outputs["Color"], normal_map.inputs["Color"])
         links.new(normal_map.outputs["Normal"], shader.inputs["Normal"])
+    elif normal:
+        material["NR_unlinked_texture_slot_1"] = os.path.basename(normal_source or "")
+        nodes.remove(normal)
     material_cache[key] = material
     return material
 
@@ -660,7 +849,7 @@ class NRCharacterProperties(PropertyGroup):
         description="Subdivision Surface level for solid body meshes; hair cards and repaired parts are excluded",
         min=0,
         max=2,
-        default=1,
+        default=0,
     )
     last_report: StringProperty(name="Last report", default="")
 

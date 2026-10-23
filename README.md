@@ -44,7 +44,7 @@
 4. **Output folder** 可以留空。留空时，已保存的 `.blend` 会将转换后的贴图写入工程旁边的 `nr_blender_output` 文件夹；未保存的工程会写入用户目录下的 `Naraka_NR_Output` 文件夹。
 5. 点击 **Import and link character**。
 
-导入前可在面板中调整 **Repair detached face and hair** 和 **Geometry refinement**。前者默认开启，会把头部相关绘制通道按脸部位置校正；后者默认是 1，发丝卡片和被校正的头部卡片不会做细分，以免透明轮廓变形。
+导入前可在面板中调整 **Repair detached face and hair** 和 **Geometry refinement**。前者默认开启，会把头部相关绘制通道按脸部位置校正；后者默认是 0，以减少高面数网格的视口负担，需要时可手动提高。插件会结合 Alpha 分布和颜色特征识别发丝贴图并进行清晰裁切；蕾丝、薄纱等同时包含透明、实心和柔和过渡区域的颜色贴图会保留连续 Alpha，尽量避免镂空显示成黑色。明显属于打包数据的 Alpha 不会连接到透明度。
 
 导入的模型会放在 `NR_Character` 集合中，转换后的贴图位于输出目录的 `textures` 子目录。
 

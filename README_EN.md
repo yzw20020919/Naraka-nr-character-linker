@@ -33,7 +33,7 @@ The ZIP must contain a top-level `r_character_linker` folder with `__init__.py` 
 4. Optionally set **Output folder**. If it is empty, converted textures are written beside the saved `.blend`, or to `Naraka_NR_Output` when the file has not been saved yet.
 5. Click **Import and link character**.
 
-Before importing, you can adjust **Repair detached face and hair** and **Geometry refinement**. The repair option is enabled by default and aligns head-related draw channels to the captured face. Refinement defaults to level 1; hair cards and repaired head cards are excluded so their transparent silhouettes are preserved.
+Before importing, you can adjust **Repair detached face and hair** and **Geometry refinement**. The repair option is enabled by default and aligns head-related draw channels to the captured face. Refinement defaults to level 0 to reduce viewport load on dense meshes; raise it when needed. Hair direction maps are detected from alpha distribution and color features and use crisp cutouts. Color maps with mixed clear, opaque, and softly blended regions, such as lace or sheer fabric, keep their continuous alpha so cutouts do not render black. Alpha channels that look like packed material data remain disconnected from transparency.
 
 The imported meshes are placed in the `NR_Character` collection. Converted textures are written under the selected output folder's `textures` directory.
 
